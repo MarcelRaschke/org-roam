@@ -5,7 +5,7 @@
 ;; Author: Jethro Kuan <jethrokuan95@gmail.com>
 ;; URL: https://github.com/org-roam/org-roam
 ;; Keywords: org-mode, roam, convenience
-;; Version: 2.2.0
+;; Version: 2.2.1
 ;; Package-Requires: ((emacs "26.1") (dash "2.13") (org "9.4") (emacsql "3.0.0") (emacsql-sqlite "1.0.0") (magit-section "3.0.0"))
 
 ;; This file is NOT part of GNU Emacs.
@@ -83,6 +83,7 @@
 (require 'emacsql-sqlite)
 
 (require 'org)
+(require 'org-attach)                   ; To set `org-attach-id-dir'
 (require 'org-id)
 (require 'ol)
 (require 'org-element)
@@ -122,6 +123,12 @@ All Org files, at any level of nesting, are considered part of the Org-roam."
   :group 'org-roam
   :type 'hook)
 
+(defcustom org-roam-post-node-insert-hook nil
+  "Hook run when an Org-roam node is inserted as an Org link.
+Each function takes two arguments: the id of the node, and the link description."
+  :group 'org-roam
+  :type 'hook)
+
 (defcustom org-roam-file-extensions '("org")
   "List of file extensions to be included by Org-Roam.
 While a file extension different from \".org\" may be used, the
@@ -130,9 +137,11 @@ responsibility to ensure that."
   :type '(repeat string)
   :group 'org-roam)
 
-(defcustom org-roam-file-exclude-regexp nil
+(defcustom org-roam-file-exclude-regexp (list org-attach-id-dir)
   "Files matching this regular expression are excluded from the Org-roam."
   :type '(choice
+          (repeat
+           (string :tag "Regular expression matching files to ignore"))
           (string :tag "Regular expression matching files to ignore")
           (const :tag "Include everything" nil))
   :group 'org-roam)
@@ -187,14 +196,25 @@ FILE is an Org-roam file if:
          (ext (when path (org-roam--file-name-extension path)))
          (ext (if (string= ext "gpg")
                   (org-roam--file-name-extension (file-name-sans-extension path))
-                ext)))
+                ext))
+         (org-roam-dir-p (org-roam-descendant-of-p path org-roam-directory))
+         (valid-file-ext-p (member ext org-roam-file-extensions))
+         (match-exclude-regexp-p
+          (cond
+           ((not org-roam-file-exclude-regexp) nil)
+           ((stringp org-roam-file-exclude-regexp)
+            (string-match-p org-roam-file-exclude-regexp path))
+           ((listp org-roam-file-exclude-regexp)
+            (let (is-match)
+              (dolist (exclude-re org-roam-file-exclude-regexp)
+                (setq is-match (or is-match (string-match-p exclude-re path))))
+              is-match)))))
     (save-match-data
       (and
        path
-       (member ext org-roam-file-extensions)
-       (not (and org-roam-file-exclude-regexp
-                 (string-match-p org-roam-file-exclude-regexp path)))
-       (org-roam-descendant-of-p path (expand-file-name org-roam-directory))))))
+       org-roam-dir-p
+       valid-file-ext-p
+       (not match-exclude-regexp-p)))))
 
 (defun org-roam-list-files ()
   "Return a list of all Org-roam files under `org-roam-directory'.
@@ -260,7 +280,7 @@ If no files are found, an empty list is returned."
        (ansi-color-filter-apply it)
        (split-string it "\n")
        (seq-filter (lambda (s)
-                     (or (null s) (string= "" s))) it)))
+                     (not (or (null s) (string= "" s)))) it)))
 
 (defun org-roam--list-files-search-globs (exts)
   "Given EXTS, return a list of search globs.
@@ -313,6 +333,7 @@ E.g. (\".org\") => (\"*.org\" \"*.org.gpg\")"
   (require 'org-roam-utils)
   (require 'org-roam-db)
   (require 'org-roam-node)
+  (require 'org-roam-id)
   (require 'org-roam-capture)
   (require 'org-roam-mode)
   (require 'org-roam-migrate))

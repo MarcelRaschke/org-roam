@@ -5,7 +5,7 @@
 ;; Author: Jethro Kuan <jethrokuan95@gmail.com>
 ;; URL: https://github.com/org-roam/org-roam
 ;; Keywords: org-mode, roam, convenience
-;; Version: 2.2.0
+;; Version: 2.2.1
 ;; Package-Requires: ((emacs "26.1") (dash "2.13") (org "9.4") (magit-section "3.0.0"))
 
 ;; This file is NOT part of GNU Emacs.
@@ -131,7 +131,8 @@ It takes a single argument REF, which is a propertized string."
   :type 'boolean)
 
 (defcustom org-roam-extract-new-file-path "%<%Y%m%d%H%M%S>-${slug}.org"
-  "The file path to use when a node is extracted to its own file."
+  "The file path template to use when a node is extracted to its own file.
+This path is relative to `org-roam-directory'."
   :group 'org-roam
   :type 'string)
 
@@ -186,14 +187,12 @@ It takes a single argument REF, which is a propertized string."
                            816 ; U+0330 COMBINING TILDE BELOW
                            817 ; U+0331 COMBINING MACRON BELOW
                            )))
-    (cl-flet* ((nonspacing-mark-p (char)
-                                  (memq char slug-trim-chars))
-               (strip-nonspacing-marks (s)
-                                       (string-glyph-compose
-                                        (apply #'string (seq-remove #'nonspacing-mark-p
-                                                                    (string-glyph-decompose s)))))
-               (cl-replace (title pair)
-                           (replace-regexp-in-string (car pair) (cdr pair) title)))
+    (cl-flet* ((nonspacing-mark-p (char) (memq char slug-trim-chars))
+               (strip-nonspacing-marks (s) (string-glyph-compose
+                                            (apply #'string
+                                                   (seq-remove #'nonspacing-mark-p
+                                                               (string-glyph-decompose s)))))
+               (cl-replace (title pair) (replace-regexp-in-string (car pair) (cdr pair) title)))
       (let* ((pairs `(("[^[:alnum:][:digit:]]" . "_") ;; convert anything not alphanumeric
                       ("__*" . "_")                   ;; remove sequential underscores
                       ("^_" . "")                     ;; remove starting underscore
@@ -426,19 +425,41 @@ GROUP BY id")))
                               all-titles)))))
 
 ;;;; Finders
-(defun org-roam-node-find-noselect (node &optional force)
-  "Navigate to the point for NODE, and return the buffer.
-If NODE is already visited, this won't automatically move the
-point to the beginning of the NODE, unless FORCE is non-nil."
-  (unless (org-roam-node-file node)
-    (user-error "Node does not have corresponding file"))
-  (let ((buf (find-file-noselect (org-roam-node-file node))))
-    (with-current-buffer buf
-      (when (or force
-                (not (equal (org-roam-node-id node)
-                            (org-roam-id-at-point))))
-        (goto-char (org-roam-node-point node))))
-    buf))
+(defun org-roam-node-marker (node)
+  "Get the marker for NODE."
+  (unwind-protect
+      (let* ((file (org-roam-node-file node))
+             (buffer (or (find-buffer-visiting file)
+                         (find-file-noselect file))))
+        (with-current-buffer buffer
+          (move-marker (make-marker) (org-roam-node-point node) buffer)))))
+
+(defun org-roam-node-open (node &optional cmd force)
+  "Go to the node NODE.
+CMD is the command used to display the buffer. If not provided,
+`org-link-frame-setup' is respected. Assumes that the node is
+fully populated, with file and point. If NODE is already visited,
+this won't automatically move the point to the beginning of the
+NODE, unless FORCE is non-nil."
+  (interactive (list (org-roam-node-at-point) current-prefix-arg))
+  (org-mark-ring-push)
+  (let ((m (org-roam-node-marker node))
+        (cmd (or cmd
+                 (cdr
+                  (assq
+                   (cdr (assq 'file org-link-frame-setup))
+                   '((find-file . switch-to-buffer)
+                     (find-file-other-window . switch-to-buffer-other-window)
+                     (find-file-other-frame . switch-to-buffer-other-frame))))
+                 'switch-to-buffer-other-window)))
+    (if (not (equal (current-buffer) (marker-buffer m)))
+        (funcall cmd (marker-buffer m)))
+    (when (or force
+              (not (equal (org-roam-node-id node)
+                          (org-roam-id-at-point))))
+      (goto-char m))
+    (move-marker m nil))
+  (org-show-context))
 
 (defun org-roam-node-visit (node &optional other-window force)
   "From the current buffer, visit NODE. Return the visited buffer.
@@ -450,13 +471,10 @@ If NODE is already visited, this won't automatically move the
 point to the beginning of the NODE, unless FORCE is non-nil. In
 interactive calls FORCE always set to t."
   (interactive (list (org-roam-node-at-point t) current-prefix-arg t))
-  (let ((buf (org-roam-node-find-noselect node force))
-        (display-buffer-fn (if other-window
+  (org-roam-node-open node (if other-window
                                #'switch-to-buffer-other-window
-                             #'pop-to-buffer-same-window)))
-    (funcall display-buffer-fn buf)
-    (when (org-invisible-p) (org-show-context))
-    buf))
+                             #'pop-to-buffer-same-window)
+                      force))
 
 ;;;###autoload
 (cl-defun org-roam-node-find (&optional other-window initial-input filter-fn &key templates)
@@ -670,9 +688,13 @@ The INFO, if provided, is passed to the underlying `org-roam-capture-'."
                   (delete-region beg end)
                   (set-marker beg nil)
                   (set-marker end nil))
-                (insert (org-link-make-string
-                         (concat "id:" (org-roam-node-id node))
-                         description)))
+                (let ((id (org-roam-node-id node)))
+                  (insert (org-link-make-string
+                           (concat "id:" id)
+                           description))
+                  (run-hook-with-args 'org-roam-post-node-insert-hook
+                                      id
+                                      description)))
             (org-roam-capture-
              :node node
              :info info
@@ -680,30 +702,9 @@ The INFO, if provided, is passed to the underlying `org-roam-capture-'."
              :props (append
                      (when (and beg end)
                        (list :region (cons beg end)))
-                     (list :insert-at (point-marker)
-                           :link-description description
+                     (list :link-description description
                            :finalize 'insert-link))))))
     (deactivate-mark)))
-
-(add-hook 'org-roam-find-file-hook #'org-roam-open-id-with-org-roam-db-h)
-(defun org-roam-open-id-with-org-roam-db-h ()
-  "Try to open \"id:\" links at point by querying them to the database."
-  (add-hook 'org-open-at-point-functions #'org-roam-open-id-at-point nil t))
-
-(defun org-roam-open-id-at-point ()
-  "Navigate to \"id:\" link at point using the Org-roam database."
-  (when (org-in-regexp org-link-any-re)
-    (let ((link (match-string 2))
-          id)
-      (when (string-prefix-p "id:" link)
-        (setq id (substring-no-properties link 3))
-        (let ((node (org-roam-populate (org-roam-node-create :id id))))
-          (cond
-           ((org-roam-node-file node)
-            (org-mark-ring-push)
-            (org-roam-node-visit node nil 'force)
-            t)
-           (t nil)))))))
 
 ;;;;; [roam:] link
 (org-link-set-parameters "roam" :follow #'org-roam-link-follow-link)
@@ -818,7 +819,8 @@ Any tags declared on #+FILETAGS: are transferred to tags on the new top heading.
 Any top level properties drawers are incorporated into the new heading."
   (interactive)
   (org-with-point-at 1
-    (org-map-entries 'org-do-demote)
+    (org-map-region #'org-do-demote
+                    (point-min) (point-max))
     (insert "* "
             (org-roam--get-keyword "title")
             "\n")
@@ -827,21 +829,40 @@ Any top level properties drawers are incorporated into the new heading."
     (org-roam-erase-keyword "title")
     (org-roam-erase-keyword "filetags")))
 
+(defun org-roam--h1-count ()
+  "Count level-1 headings in the current file."
+  (let ((h1-count 0))
+    (org-with-wide-buffer
+     (org-map-region (lambda ()
+                       (if (= (org-current-level) 1)
+                           (incf h1-count)))
+                     (point-min) (point-max))
+     h1-count)))
+
+(defun org-roam--buffer-promoteable-p ()
+  "Verify that this buffer is promoteable:
+There is a single level-1 heading
+and no extra content before the first heading."
+  (and
+   (= (org-roam--h1-count) 1)
+   (org-with-point-at 1 (org-at-heading-p))))
+
 (defun org-roam-promote-entire-buffer ()
   "Promote the current buffer.
-Converts a file containing a headline node at the top to a file
+Converts a file containing a single level-1 headline node to a file
 node."
   (interactive)
+  (unless (org-roam--buffer-promoteable-p)
+    (user-error "Cannot promote: multiple root headings or there is extra file-level text"))
   (org-with-point-at 1
-    (org-map-entries (lambda ()
-                       (when (> (org-outline-level) 1)
-                         (org-do-promote))))
     (let ((title (nth 4 (org-heading-components)))
-          (tags (nth 5 (org-heading-components))))
-      (beginning-of-line)
-      (kill-line 1)
-      (org-roam-set-keyword "title" title)
-      (when tags (org-roam-set-keyword "filetags" tags)))))
+          (tags (org-get-tags)))
+      (kill-whole-line)
+      (org-roam-end-of-meta-data)
+      (insert "#+title: " title "\n")
+      (when tags (org-roam-tag-add tags))
+      (org-map-region #'org-promote (point-min) (point-max))
+      (org-roam-db-update-file))))
 
 ;;;###autoload
 (defun org-roam-refile ()
@@ -927,52 +948,20 @@ If region is active, then use it instead of the node at point."
                            (t (let ((r (read-from-minibuffer (format "%s: " key) default-val)))
                                 (plist-put template-info ksym r)
                                 r)))))))
-           (file-path (read-file-name "Extract node to: "
-                                      (file-name-as-directory org-roam-directory) template nil template)))
+           (file-path
+            (expand-file-name
+             (read-file-name "Extract node to: "
+                             (file-name-as-directory org-roam-directory) template nil template)
+             org-roam-directory)))
       (when (file-exists-p file-path)
         (user-error "%s exists. Aborting" file-path))
       (org-cut-subtree)
       (save-buffer)
       (with-current-buffer (find-file-noselect file-path)
         (org-paste-subtree)
+        (while (> (org-current-level) 1) (org-promote-subtree))
         (org-roam-promote-entire-buffer)
         (save-buffer)))))
-
-;;; IDs
-;;;; Getters
-(defun org-roam-id-at-point ()
-  "Return the ID at point, if any.
-Recursively traverses up the headline tree to find the
-first encapsulating ID."
-  (org-with-wide-buffer
-   (org-back-to-heading-or-point-min t)
-   (while (and (not (org-roam-db-node-p))
-               (not (bobp)))
-     (org-roam-up-heading-or-point-min))
-   (when (org-roam-db-node-p)
-     (org-id-get))))
-
-;;;###autoload
-(defun org-roam-update-org-id-locations (&rest directories)
-  "Scan Org-roam files to update `org-id' related state.
-This is like `org-id-update-id-locations', but will automatically
-use the currently bound `org-directory' and `org-roam-directory'
-along with DIRECTORIES (if any), where the lookup for files in
-these directories will be always recursive.
-
-Note: Org-roam doesn't have hard dependency on
-`org-id-locations-file' to lookup IDs for nodes that are stored
-in the database, but it still tries to properly integrates with
-`org-id'. This allows the user to cross-reference IDs outside of
-the current `org-roam-directory', and also link with \"id:\"
-links to headings/files within the current `org-roam-directory'
-that are excluded from identification in Org-roam as
-`org-roam-node's, e.g. with \"ROAM_EXCLUDE\" property."
-  (interactive)
-  (cl-loop for dir in (cons org-roam-directory directories)
-           for org-roam-directory = dir
-           nconc (org-roam-list-files) into files
-           finally (org-id-update-id-locations files org-roam-verbose)))
 
 ;;; Refs
 ;;;; Completing-read interface

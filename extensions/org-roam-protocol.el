@@ -4,7 +4,7 @@
 ;; Author: Jethro Kuan <jethrokuan95@gmail.com>
 ;; URL: https://github.com/org-roam/org-roam
 ;; Keywords: org-mode, roam, convenience
-;; Version: 2.2.0
+;; Version: 2.2.1
 ;; Package-Requires: ((emacs "26.1") (org "9.4") (org-roam "2.1"))
 
 ;; This file is NOT part of GNU Emacs.
@@ -168,25 +168,6 @@ org-protocol://roam-node?node=uuid"
       org-protocol-protocol-alist)
 (push '("org-roam-node"  :protocol "roam-node"   :function org-roam-protocol-open-node)
       org-protocol-protocol-alist)
-
-;;; Capture implementation
-(add-hook 'org-roam-capture-preface-hook #'org-roam-protocol--try-capture-to-ref-h)
-(defun org-roam-protocol--try-capture-to-ref-h ()
-  "Try to capture to an existing node that match the ref."
-  (when-let ((node (and (plist-get org-roam-capture--info :ref)
-                        (org-roam-node-from-ref
-                         (plist-get org-roam-capture--info :ref)))))
-    (set-buffer (org-capture-target-buffer (org-roam-node-file node)))
-    (goto-char (org-roam-node-point node))
-    (widen)
-    (org-roam-node-id node)))
-
-(add-hook 'org-roam-capture-new-node-hook #'org-roam-protocol--insert-captured-ref-h)
-(defun org-roam-protocol--insert-captured-ref-h ()
-  "Insert the ref if any."
-  (when-let ((ref (plist-get org-roam-capture--info :ref)))
-    (org-roam-ref-add ref)))
-
 
 (provide 'org-roam-protocol)
 
